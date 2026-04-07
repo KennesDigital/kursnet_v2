@@ -51,8 +51,6 @@ def parse_args():
     )
     parser.add_argument("input",  help="Eingabe-Excel-Datei (z. B. KursNet.xlsx)")
     parser.add_argument("output", help="Ausgabe-XML-Datei (z. B. kursnet_upload.xml)")
-    parser.add_argument("--supplier-id",      default="", help="Lieferanten-ID")
-    parser.add_argument("--supplier-name",    default="", help="Name des Bildungsträgers")
     parser.add_argument("--catalog-id",       default="", help="Katalog-ID")
     parser.add_argument("--catalog-name",     default="", help="Katalogname")
     parser.add_argument("--catalog-version",  default="1.0", help="Katalogversion (Standard: 1.0)")
@@ -347,8 +345,34 @@ def build_xml(order: list, groups: dict, args) -> Element:
     add_text(catalog, "LANGUAGE",        args.language)
 
     supplier = SubElement(header, "SUPPLIER")
-    add_text(supplier, "SUPPLIER_ID",   args.supplier_id)
-    add_text(supplier, "SUPPLIER_NAME", args.supplier_name)
+
+    SubElement(supplier, "SUPPLIER_ID", type="supplier_specific").text = "245884"
+    add_text(supplier, "SUPPLIER_NAME", "STARTUP PROFI einfach. clever. gründen.")
+
+    sup_addr = SubElement(supplier, "ADDRESS")
+    add_text(sup_addr, "NAME",    "STARTUP PROFI einfach. clever.")
+    add_text(sup_addr, "STREET",  "Waldhofer Str. 102")
+    add_text(sup_addr, "ZIP",     "69123")
+    add_text(sup_addr, "CITY",    "Heidelberg")
+    add_text(sup_addr, "COUNTRY", "Deutschland")
+    add_text(sup_addr, "PHONE",   "+49.6221.3218416")
+    sup_addr_emails = SubElement(sup_addr, "EMAILS")
+    add_text(sup_addr_emails, "EMAIL", "info@startup-profi.de")
+
+    sup_contact = SubElement(supplier, "CONTACT")
+    SubElement(sup_contact, "CONTACT_ROLE", type="2").text = "Gesamtansprechpartner"
+    add_text(sup_contact, "SALUTATION",  "m")
+    add_text(sup_contact, "FIRST_NAME",  "Patrick")
+    add_text(sup_contact, "LAST_NAME",   "Schaefer")
+    add_text(sup_contact, "PHONE",       "+49.6221.3218416")
+    sup_con_emails = SubElement(sup_contact, "EMAILS")
+    add_text(sup_con_emails, "EMAIL", "info@startup-profi.de")
+    SubElement(sup_contact, "CONTACT_REMARKS")
+
+    add_text(supplier, "KEYWORD", "STARTUP PROFI einfach. clever. gründen.")
+
+    ext_info = SubElement(supplier, "EXTENDED_INFO", input_type="2")
+    SubElement(ext_info, "ORGANIZATIONAL_FORM", type="2").text = "Private Bildungseinrichtung"
 
     return root
 
