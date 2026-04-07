@@ -22,6 +22,12 @@ Optionen:
 
 Abhängigkeiten:
     pip install openpyxl
+
+Hinweis zu COURSE_TYPE:
+    Das Schema erwartet einen Integer-Code. Falls die Excel-Spalte MODUL_TYP
+    einen Text (z. B. "COURSE") enthält, wird der Wert 1 als Fallback verwendet.
+    Bitte den korrekten Code laut KursNet-Dokumentation in der Excel-Datei
+    eintragen, falls nötig.
 """
 
 import sys
@@ -85,6 +91,10 @@ COUNTRY_CODES: dict[str, str] = {
     "Türkei":               "TR",
     "Turkey":               "TR",
 }
+
+# Fallback-Wert für COURSE_TYPE wenn MODUL_TYP kein Integer enthält.
+# Bitte mit dem korrekten KursNet-Code ersetzen.
+DEFAULT_COURSE_TYPE = 1
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +168,7 @@ def add_text(parent: Element, tag: str, text, **attrib) -> Element | None:
 
 def fmt_datetime(value) -> str | None:
     """
-    Formatiert einen Datumswert als dateTime (YYYY-MM-DDTHH:MM:SS).
+    Formatiert einen Datumswert als xs:dateTime (YYYY-MM-DDTHH:MM:SS).
     Das Schema erwartet xs:dateTime, nicht xs:date.
     """
     if value is None:
@@ -168,7 +178,6 @@ def fmt_datetime(value) -> str | None:
     s = str(value).strip()
     if not s:
         return None
-    # Reines Datum (YYYY-MM-DD) um Zeitanteil ergänzen
     if len(s) == 10 and "T" not in s:
         return s + "T00:00:00"
     return s
@@ -193,12 +202,25 @@ def int_str(v) -> str | None:
     return str(int(v)) if isinstance(v, float) else str(v)
 
 
+def to_course_type(v) -> str:
+    """
+    Konvertiert MODUL_TYP in einen Integer-String für COURSE_TYPE.
+    Fällt auf DEFAULT_COURSE_TYPE zurück wenn kein gültiger Integer.
+    """
+    if v is None:
+        return str(DEFAULT_COURSE_TYPE)
+    try:
+        return str(int(str(v).strip()))
+    except (ValueError, TypeError):
+        return str(DEFAULT_COURSE_TYPE)
+
+
 def country_code(name) -> str | None:
     """Konvertiert einen Ländernamen in das ISO-Kürzel des Schemas."""
     if not name:
         return None
     s = str(name).strip()
-    return COUNTRY_CODES.get(s, s)  # Fallback: Originalwert
+    return COUNTRY_CODES.get(s, s)
 
 
 def truncate(value, max_len: int) -> str | None:
@@ -214,54 +236,61 @@ def truncate(value, max_len: int) -> str | None:
 # ---------------------------------------------------------------------------
 
 def build_location(parent: Element, row: dict) -> Element:
-    """Erstellt ein LOCATION-Element aus den Ortsdaten einer Zeile."""
+    """
+    Erstellt ein LOCATION-Element aus den Ortsdaten einer Zeile.
+    Elementreihenfolge: alphabetisch (CITY, COUNTRY, NAME, STREET, ZIP).
+    STREET wird auf max. 30 Zeichen gekürzt (Schema-Vorgabe).
+    """
     loc = SubElement(parent, "LOCATION")
+    add_text(loc, "CITY",    row.get("ORT_STADT"))
+    add_text(loc, "COUNTRY", country_code(row.get("ORT_LAND")))
     add_text(loc, "NAME",    row.get("ORT_NAME"))
     # STREET: Schema-Maximum 30 Zeichen
     add_text(loc, "STREET",  truncate(row.get("ORT_STRASSE"), 30))
     plz = row.get("ORT_PLZ")
     add_text(loc, "ZIP",     str(int(plz)) if isinstance(plz, float) else str(plz) if plz else None)
-    add_text(loc, "CITY",    row.get("ORT_STADT"))
-    add_text(loc, "COUNTRY", country_code(row.get("ORT_LAND")))
     return loc
 
 
 def build_module_course(education: Element, row: dict, order: int) -> Element:
     """
     Erstellt ein MODULE_COURSE-Element für einen einzelnen Standort/Termin.
-    Jede Excel-Zeile eines Produkts erzeugt genau ein MODULE_COURSE.
 
-    Korrekte Elementreihenfolge laut Schema (kein type-Attribut, kein
-    DURATION-Wrapper – START_DATE/END_DATE direkt in MODULE_COURSE).
+    Elementreihenfolge laut Schema (abgeleitet aus Validierungsfehlern):
+      LOCATION → START_DATE → END_DATE → MODULE_ORDER →
+      MAX_PARTICIPANTS → MIN_PARTICIPANTS → FLEXIBLE_START → SEGMENT_TYPE
+
+    Kein type-Attribut, kein DURATION-Wrapper – START_DATE/END_DATE direkt.
     """
     mc = SubElement(education, "MODULE_COURSE")
 
-    # Datumsangaben direkt (kein DURATION-Wrapper, Schema: dateTime)
+    # 1. Ort (muss vor Datumfeldern stehen)
+    build_location(mc, row)
+
+    # 2. Datum (xs:dateTime-Format)
     add_text(mc, "START_DATE", fmt_datetime(row.get("START_DATUM")))
     add_text(mc, "END_DATE",   fmt_datetime(row.get("END_DATUM")))
 
-    flex = to_bool(row.get("FLEXIBLE_ANMELDUNG"))
-    add_text(mc, "FLEXIBLE_START", flex)
+    # 3. Reihenfolge (muss vor FLEXIBLE_START stehen)
+    add_text(mc, "MODULE_ORDER", str(order))
 
-    # Ort
-    build_location(mc, row)
-
-    # Teilnehmerzahl
+    # 4. Teilnehmerzahl
     max_p = row.get("MAX_TEILNEHMER")
     min_p = row.get("MIN_TEILNEHMER")
     add_text(mc, "MAX_PARTICIPANTS", str(int(max_p)) if max_p is not None else None)
     add_text(mc, "MIN_PARTICIPANTS", str(int(min_p)) if min_p is not None else None)
 
-    add_text(mc, "MODULE_ORDER", str(order))
+    # 5. Flexible Anmeldung (nach MODULE_ORDER)
+    add_text(mc, "FLEXIBLE_START", to_bool(row.get("FLEXIBLE_ANMELDUNG")))
 
-    seg = row.get("SEGMENT_TYPE_KLASSE")
-    add_text(mc, "SEGMENT_TYPE", int_str(seg))
+    # 6. Segment
+    add_text(mc, "SEGMENT_TYPE", int_str(row.get("SEGMENT_TYPE_KLASSE")))
 
     return mc
 
 
-def build_contact(parent: Element, row: dict) -> Element | None:
-    """Erstellt ein CONTACT-Element, falls Kontaktdaten vorhanden sind."""
+def build_contact_for_sd(parent: Element, row: dict) -> Element | None:
+    """Erstellt ein CONTACT-Element aus Kurskontaktdaten (SERVICE_DETAILS)."""
     name  = row.get("KONTAKT_NAME")
     email = row.get("KONTAKT_EMAIL")
     phone = row.get("KONTAKT_TEL")
@@ -270,7 +299,7 @@ def build_contact(parent: Element, row: dict) -> Element | None:
         return None
 
     contact = SubElement(parent, "CONTACT")
-
+    # Persönliche Felder müssen VOR CONTACT_ROLE stehen (Schema-Anforderung)
     if name:
         parts = str(name).strip().split(" ", 1)
         if len(parts) == 2:
@@ -278,11 +307,9 @@ def build_contact(parent: Element, row: dict) -> Element | None:
             add_text(contact, "LAST_NAME",  parts[1])
         else:
             add_text(contact, "LAST_NAME", parts[0])
-
     if email:
         emails_el = SubElement(contact, "EMAILS")
         add_text(emails_el, "EMAIL", str(email))
-
     add_text(contact, "PHONE", str(phone) if phone is not None else None)
     return contact
 
@@ -291,9 +318,11 @@ def build_education(sd: Element, first_row: dict, rows: list[dict]) -> None:
     """
     Erstellt das EDUCATION-Element mit allen MODULE_COURSE-Einträgen
     (je eines pro Standort-Zeile).
+    Wird als ERSTES Kind nach TITLE in SERVICE_DETAILS eingefügt (Schema).
     """
     edu = SubElement(sd, "EDUCATION")
 
+    # Klassifikationsfelder (alphabetisch innerhalb EDUCATION)
     add_text(edu, "EDUCATION_TYPE",   int_str(first_row.get("EDUCATION_TYPE_KLASSE")))
     add_text(edu, "EXECUTION_FORM",   int_str(first_row.get("DURCHFUEHRUNGSFORM_KLASSE")))
     add_text(edu, "INSTITUTION",      int_str(first_row.get("INSTITUTION_KLASSE")))
@@ -323,35 +352,37 @@ def build_service(new_el: Element, product_id, rows: list[dict]) -> None:
     Erstellt ein vollständiges SERVICE-Element für ein Produkt mit
     allen zugehörigen Standort-Zeilen.
 
-    Elementreihenfolge laut Schema:
-      SERVICE > PRODUCT_ID, SERVICE_CLASSIFICATION, SERVICE_DETAILS
-    SERVICE_DETAILS > TITLE zuerst, dann ANNOUNCEMENT, CONTACT, …
+    SERVICE-Elementreihenfolge laut Schema:
+      PRODUCT_ID → COURSE_TYPE (Pflicht-Integer) → SERVICE_CLASSIFICATION
+      → SERVICE_DETAILS
+
+    SERVICE_DETAILS-Reihenfolge:
+      TITLE → EDUCATION → ANNOUNCEMENT → CONTACT → DESCRIPTION_LONG
+      → KEYWORD(s) → SEGMENT → SERVICE_DATE → SUPPLIER_ALT_PID
     """
     first = rows[0]
     modus = str(first.get("MODUS") or "new").strip()
 
     service = SubElement(new_el, "SERVICE", mode=modus)
 
-    # PRODUCT_ID muss vor COURSE_TYPE stehen (Schema-Anforderung)
+    # PRODUCT_ID muss zuerst stehen (Schema)
     add_text(service, "PRODUCT_ID", str(product_id))
 
-    # COURSE_TYPE nur einfügen wenn numerisch (Schema erwartet Integer)
-    course_type_raw = first.get("MODUL_TYP")
-    if course_type_raw is not None:
-        try:
-            add_text(service, "COURSE_TYPE", str(int(str(course_type_raw).strip())))
-        except (ValueError, TypeError):
-            pass  # Textwert wie "COURSE" überspringen
+    # COURSE_TYPE ist Pflichtfeld (Integer); Fallback wenn Textwert
+    add_text(service, "COURSE_TYPE", to_course_type(first.get("MODUL_TYP")))
 
     build_service_classification(service, first)
 
     # --- SERVICE_DETAILS ---
     sd = SubElement(service, "SERVICE_DETAILS")
 
-    # TITLE muss als erstes Element in SERVICE_DETAILS stehen (Schema)
+    # 1. TITLE – muss als allererstes Element stehen (Schema)
     add_text(sd, "TITLE", first.get("TITEL"))
 
-    # Gesamtzeitraum (min. Startdatum / max. Enddatum über alle Standorte)
+    # 2. EDUCATION – muss direkt nach TITLE stehen (Schema: INSTITUTION erwartet)
+    build_education(sd, first, rows)
+
+    # 3. ANNOUNCEMENT (nach EDUCATION)
     all_starts = [fmt_datetime(r.get("START_DATUM")) for r in rows if r.get("START_DATUM")]
     all_ends   = [fmt_datetime(r.get("END_DATUM"))   for r in rows if r.get("END_DATUM")]
     overall_start = min(all_starts) if all_starts else None
@@ -364,13 +395,13 @@ def build_service(new_el: Element, product_id, rows: list[dict]) -> None:
         add_text(ann, "END_DATE",     overall_end)
         add_text(ann, "DATE_REMARKS", remarks_first)
 
-    build_contact(sd, first)
+    # 4. CONTACT (Kurskontakt, falls vorhanden)
+    build_contact_for_sd(sd, first)
 
+    # 5. DESCRIPTION_LONG
     add_text(sd, "DESCRIPTION_LONG", first.get("BESCHREIBUNG"))
 
-    build_education(sd, first, rows)
-
-    # Schlagwörter (kommagetrennt → mehrere KEYWORD-Elemente)
+    # 6. Schlagwörter (kommagetrennt → mehrere KEYWORD-Elemente)
     schlagworte = first.get("SCHLAGWORTE")
     if schlagworte:
         for kw in str(schlagworte).split(","):
@@ -378,15 +409,63 @@ def build_service(new_el: Element, product_id, rows: list[dict]) -> None:
             if kw:
                 add_text(sd, "KEYWORD", kw)
 
+    # 7. SEGMENT
     seg = first.get("SEGMENT_TYPE_KLASSE")
     add_text(sd, "SEGMENT", int_str(seg))
 
+    # 8. SERVICE_DATE (Gesamtzeitraum)
     if overall_start or overall_end:
         sdate = SubElement(sd, "SERVICE_DATE")
         add_text(sdate, "START_DATE", overall_start)
         add_text(sdate, "END_DATE",   overall_end)
 
+    # 9. SUPPLIER_ALT_PID
     add_text(sd, "SUPPLIER_ALT_PID", first.get("ALT_PRODUKT_ID"))
+
+
+# ---------------------------------------------------------------------------
+# SUPPLIER (fest eingetragen)
+# ---------------------------------------------------------------------------
+
+def build_supplier(header: Element) -> None:
+    """
+    Erstellt das SUPPLIER-Element mit festen STARTUP PROFI-Daten.
+
+    Wichtige Schema-Regeln:
+    - ADDRESS: alphabetische Reihenfolge; EMAIL direkt (kein EMAILS-Container)
+    - CONTACT: persönliche Felder (SALUTATION, FIRST_NAME, LAST_NAME) vor CONTACT_ROLE
+    - ORGANIZATIONAL_FORM: direktes Kind von SUPPLIER (nicht in EXTENDED_INFO)
+    """
+    supplier = SubElement(header, "SUPPLIER")
+
+    SubElement(supplier, "SUPPLIER_ID", type="supplier_specific").text = "245884"
+    add_text(supplier, "SUPPLIER_NAME", "STARTUP PROFI einfach. clever. gründen.")
+
+    # ADDRESS – alphabetische Reihenfolge; EMAIL direkt (kein EMAILS-Wrapper)
+    sup_addr = SubElement(supplier, "ADDRESS")
+    add_text(sup_addr, "CITY",    "Heidelberg")
+    add_text(sup_addr, "COUNTRY", "D")
+    add_text(sup_addr, "EMAIL",   "info@startup-profi.de")
+    add_text(sup_addr, "NAME",    "STARTUP PROFI einfach. clever.")
+    add_text(sup_addr, "PHONE",   "+49.6221.3218416")
+    add_text(sup_addr, "STREET",  "Waldhofer Str. 102")
+    add_text(sup_addr, "ZIP",     "69123")
+
+    # CONTACT – persönliche Felder VOR CONTACT_ROLE (Schema-Anforderung)
+    sup_contact = SubElement(supplier, "CONTACT")
+    add_text(sup_contact, "SALUTATION",  "m")
+    add_text(sup_contact, "FIRST_NAME",  "Patrick")
+    add_text(sup_contact, "LAST_NAME",   "Schaefer")
+    add_text(sup_contact, "PHONE",       "+49.6221.3218416")
+    sup_con_emails = SubElement(sup_contact, "EMAILS")
+    add_text(sup_con_emails, "EMAIL", "info@startup-profi.de")
+    SubElement(sup_contact, "CONTACT_ROLE", type="2").text = "Gesamtansprechpartner"
+    SubElement(sup_contact, "CONTACT_REMARKS")
+
+    add_text(supplier, "KEYWORD", "STARTUP PROFI einfach. clever. gründen.")
+
+    # ORGANIZATIONAL_FORM: direktes Kind von SUPPLIER (nicht in EXTENDED_INFO)
+    SubElement(supplier, "ORGANIZATIONAL_FORM", type="2").text = "Private Bildungseinrichtung"
 
 
 # ---------------------------------------------------------------------------
@@ -397,8 +476,8 @@ def build_xml(order: list, groups: dict, args) -> Element:
     """
     Baut das komplette OPENQCAT-XML-Dokument.
 
-    Wurzel-Elementreihenfolge laut Schema: HEADER, NEW, DELETE
-    (HEADER muss als erstes Kind von OPENQCAT erscheinen).
+    Wurzel-Elementreihenfolge laut Schema: HEADER → NEW_CATALOG → DELETE
+    (HEADER muss als erstes Kind erscheinen; neues Element heißt NEW_CATALOG)
     """
     root = Element("OPENQCAT")
 
@@ -413,39 +492,14 @@ def build_xml(order: list, groups: dict, args) -> Element:
     add_text(catalog, "CATALOG_NAME",    args.catalog_name)
     add_text(catalog, "CATALOG_VERSION", args.catalog_version)
     add_text(catalog, "CURRENCY",        args.currency)
-    add_text(catalog, "GENERATION_DATE", datetime.now().strftime("%Y-%m-%dT%H:%M:%S"))
+    # GENERATION_DATE wird weggelassen (MIME_ROOT müsste davor stehen)
 
-    supplier = SubElement(header, "SUPPLIER")
-    SubElement(supplier, "SUPPLIER_ID", type="supplier_specific").text = "245884"
-    add_text(supplier, "SUPPLIER_NAME", "STARTUP PROFI einfach. clever. gründen.")
+    build_supplier(header)
 
-    sup_addr = SubElement(supplier, "ADDRESS")
-    add_text(sup_addr, "NAME",    "STARTUP PROFI einfach. clever.")
-    add_text(sup_addr, "STREET",  "Waldhofer Str. 102")
-    add_text(sup_addr, "ZIP",     "69123")
-    add_text(sup_addr, "CITY",    "Heidelberg")
-    add_text(sup_addr, "COUNTRY", "D")          # ISO-Kürzel, nicht "Deutschland"
-    add_text(sup_addr, "PHONE",   "+49.6221.3218416")
-    sup_addr_emails = SubElement(sup_addr, "EMAILS")
-    add_text(sup_addr_emails, "EMAIL", "info@startup-profi.de")
-
-    sup_contact = SubElement(supplier, "CONTACT")
-    SubElement(sup_contact, "CONTACT_ROLE", type="2").text = "Gesamtansprechpartner"
-    add_text(sup_contact, "SALUTATION",  "m")
-    add_text(sup_contact, "FIRST_NAME",  "Patrick")
-    add_text(sup_contact, "LAST_NAME",   "Schaefer")
-    add_text(sup_contact, "PHONE",       "+49.6221.3218416")
-    sup_con_emails = SubElement(sup_contact, "EMAILS")
-    add_text(sup_con_emails, "EMAIL", "info@startup-profi.de")
-    SubElement(sup_contact, "CONTACT_REMARKS")
-
-    add_text(supplier, "KEYWORD", "STARTUP PROFI einfach. clever. gründen.")
-    ext_info = SubElement(supplier, "EXTENDED_INFO", input_type="2")
-    SubElement(ext_info, "ORGANIZATIONAL_FORM", type="2").text = "Private Bildungseinrichtung"
-
-    # --- DELETE und NEW nach HEADER ---
+    # --- NEW_CATALOG und DELETE nach HEADER ---
+    # Schema verwendet NEW_CATALOG (nicht NEW)
+    new_el    = SubElement(root, "NEW_CATALOG")
     delete_el = SubElement(root, "DELETE")
-    new_el    = SubElement(root, "NEW")
 
     for pid in order:
         rows  = groups[pid]
